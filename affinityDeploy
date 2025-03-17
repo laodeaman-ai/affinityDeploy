@@ -1,0 +1,69 @@
+import numpy as np
+import tensorflow as tf
+from flask import Flask, request, jsonify
+import joblib
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from rdkit.Chem.rdmolfiles import MolFromMol2File, MolFromPDBFile
+
+# Load the trained model
+model = tf.keras.models.load_model('ppar_morgan_model.keras')
+
+# Load the scaler used for target normalization
+scaler = joblib.load('scaler.pkl')  # Pastikan scaler disimpan sebelumnya
+
+app = Flask(__name__)
+
+def molecule_to_fingerprint(mol, radius=2, nBits=2048):
+    """Mengonversi molekul RDKit menjadi Morgan fingerprint (bit vektor)."""
+    if mol is None:
+        return None
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=nBits)
+    return np.array(fp).reshape(1, -1)
+
+def process_input(molecule_str, file_type):
+    """Mengonversi input molekul (SMILES, InChI, SDF, MOL2, PDB) menjadi fingerprint."""
+    try:
+        if file_type == "smiles":
+            mol = Chem.MolFromSmiles(molecule_str)
+        elif file_type == "inchi":
+            mol = Chem.MolFromInchi(molecule_str)
+        elif file_type == "sdf":
+            suppl = Chem.SDMolSupplier(molecule_str)
+            mol = next(suppl) if suppl else None
+        elif file_type == "mol2":
+            mol = MolFromMol2File(molecule_str)
+        elif file_type == "pdb":
+            mol = MolFromPDBFile(molecule_str)
+        else:
+            return None
+        return molecule_to_fingerprint(mol)
+    except Exception as e:
+        return None
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    try:
+        data = request.get_json()
+        molecule_str = data.get('molecule')
+        file_type = data.get('file_type')  # Jenis format molekul (smiles, inchi, sdf, mol2, pdb)
+
+        if not molecule_str or not file_type:
+            return jsonify({'error': 'Missing molecule or file_type'}), 400
+
+        X_input = process_input(molecule_str, file_type)
+
+        if X_input is None:
+            return jsonify({'error': 'Invalid molecule format'}), 400
+
+        # Predict using the trained model
+        y_pred_scaled = model.predict(X_input)
+        y_pred = scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()[0]
+        
+        return jsonify({'predicted_binding_affinity': float(y_pred)})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
